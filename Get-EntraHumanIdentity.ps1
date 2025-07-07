@@ -38,6 +38,8 @@ Adapted from legacy Active Directory audit tooling to support Microsoft Entra-na
 
 param (
     [string[]]$UserServiceAccountNamesLike = @(),
+    [ValidateSet("LikeOuterWildcars", "Like", "Match")]
+    [string]$UserServiceAccountNamesMatching = "LikeOuterWildcars",
     [ValidateSet("ByDomain", "Summary")]
     [string]$Mode = "ByDomain",
     [int]$DaysInactive = 180
@@ -139,8 +141,20 @@ foreach ($user in $allUsers) {
         $entry.NeverLoggedInUsers++
     }
 
-    if ($UserServiceAccountNamesLike | Where-Object { $user.UserPrincipalName -like "*$_*" }) {
-        $entry.PatternMatchedUsers++
+    if($UserServiceAccountNamesLike){
+        if ($UserServiceAccountNamesMatching -eq "LikeOuterWildcars") {
+            if ($UserServiceAccountNamesLike | Where-Object { $user.UserPrincipalName -like "*$_*" }) {
+                $entry.PatternMatchedUsers++
+            }
+        } elseif ($UserServiceAccountNamesMatching -eq "Match") {
+            if ($UserServiceAccountNamesLike | Where-Object { $user.UserPrincipalName -match "$_" }) {
+                $entry.PatternMatchedUsers++
+            }
+        } elseif ($UserServiceAccountNamesMatching -eq "Like") {
+            if ($UserServiceAccountNamesLike | Where-Object { $user.UserPrincipalName -like "$_" }) {
+                $entry.PatternMatchedUsers++
+            }
+        }
     }
 }
 
