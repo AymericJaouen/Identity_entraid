@@ -13,6 +13,12 @@ This script provides a comprehensive identity audit of a Microsoft Entra ID tena
 .PARAMETER UserServiceAccountNamesLike
 An array of wildcard string patterns (e.g., 'svc-', 'bot-', 'app-') used to flag accounts that look like service users.
 
+.PARAMETER UserServiceAccountNamesMatching
+Specifies the matching method for service account patterns:
+- 'LikeOuterWildcars': Wildcard match with *pattern*
+- 'Like': Direct -like match
+- 'Match': Regex match
+
 .PARAMETER Mode
 Specifies the output format:
 - 'ByDomain': Report grouped by domain suffix (e.g., @contoso.com)
@@ -21,11 +27,17 @@ Specifies the output format:
 .PARAMETER DaysInactive
 Number of days since last sign-in to consider a user "inactive" (default = 180).
 
-.EXAMPLE
-.\Entra-Audit.ps1 -UserServiceAccountNamesLike "svc-", "bot-" -Mode Summary -DaysInactive 120
+.PARAMETER Delimiter
+CSV delimiter character (default = ',')
 
 .EXAMPLE
-.\Entra-Audit.ps1 -Mode ByDomain
+.\Get-EntraHumanIdentity.ps1 -UserServiceAccountNamesLike "svc-", "bot-" -Mode Summary -DaysInactive 120
+
+.EXAMPLE
+.\Get-EntraHumanIdentity.ps1 -Mode ByDomain
+
+.EXAMPLE
+.\Get-EntraHumanIdentity.ps1 -UserServiceAccountExport $true -UserServiceAccountNamesMatching "Like" -UserServiceAccountNamesLike "svc-*" -Delimiter ";"
 
 .OUTPUTS
 CSV files containing a user identity and app inventory snapshot under ./EntraReports/<timestamp>.
@@ -40,11 +52,12 @@ param (
     [string[]]$UserServiceAccountNamesLike = @(),
     [ValidateSet("LikeOuterWildcars", "Like", "Match")]
     [string]$UserServiceAccountNamesMatching = "LikeOuterWildcars",
+    [boolean]$UserServiceAccountExport = $false,
     [ValidateSet("ByDomain", "Summary")]
     [string]$Mode = "ByDomain",
-    [int]$DaysInactive = 180
+    [int]$DaysInactive = 180,
+    [String]$Delimiter = ","
 )
-
 
 function Initialize-Prerequisites {
     $requiredPSVersion = [Version]"5.1"
@@ -83,6 +96,7 @@ $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $outputPath = ".\EntraReports"
 if (-not (Test-Path $outputPath)) { New-Item -Path $outputPath -ItemType Directory | Out-Null }
 $summary = @()
+$matchedUsers = @()
 
 # Culture fallback
 $script:OriginalCulture = [System.Globalization.CultureInfo]::CurrentCulture
@@ -145,14 +159,17 @@ foreach ($user in $allUsers) {
         if ($UserServiceAccountNamesMatching -eq "LikeOuterWildcars") {
             if ($UserServiceAccountNamesLike | Where-Object { $user.UserPrincipalName -like "*$_*" }) {
                 $entry.PatternMatchedUsers++
+                $matchedUsers += $user
             }
         } elseif ($UserServiceAccountNamesMatching -eq "Match") {
             if ($UserServiceAccountNamesLike | Where-Object { $user.UserPrincipalName -match "$_" }) {
                 $entry.PatternMatchedUsers++
+                $matchedUsers += $user
             }
         } elseif ($UserServiceAccountNamesMatching -eq "Like") {
             if ($UserServiceAccountNamesLike | Where-Object { $user.UserPrincipalName -like "$_" }) {
                 $entry.PatternMatchedUsers++
+                $matchedUsers += $user
             }
         }
     }
@@ -174,7 +191,7 @@ switch ($Mode) {
     "ByDomain" {
         Write-Host "Users by Domain Summary" -ForegroundColor Green
         $summary | Sort-Object Domain | Format-Table -AutoSize
-        $summary | Export-Csv -Path $fullExportPath -NoTypeInformation -Encoding UTF8
+        $summary | Export-Csv -Path $fullExportPath -NoTypeInformation -Encoding UTF8 -Delimiter $Delimiter
     }
     "Summary" {
         $total = [PSCustomObject]@{
@@ -188,11 +205,25 @@ switch ($Mode) {
             ManagedIdentities     = $ManagedIdentity.Count
         }
         $total | Format-Table
-        $total | Export-Csv -Path $fullExportPath -NoTypeInformation -Encoding UTF8
+        $total | Export-Csv -Path $fullExportPath -NoTypeInformation -Encoding UTF8 -Delimiter $Delimiter
     }
 }
 
 Write-Host "Report saved to: $fullExportPath" -ForegroundColor Cyan
+
+# Region: Export Matched Users
+if ($UserServiceAccountExport -eq $true) {
+    if ($matchedUsers.Count -gt 0) {
+        $matchedFileName = "Matched_Users_$timestamp.csv"
+        $matchedExportPath = Join-Path -Path $outputPath -ChildPath $matchedFileName
+        $matchedUsers | Select-Object DisplayName, UserPrincipalName, AccountEnabled, LastSignInDate |
+            Export-Csv -Path $matchedExportPath -NoTypeInformation -Encoding UTF8 -Delimiter $Delimiter
+        Write-Host "Matched users report saved to: $matchedExportPath" -ForegroundColor Cyan
+    } else {
+        Write-Host "No users matched the specified patterns." -ForegroundColor Yellow
+    }
+}
+
 
 # Reset culture
 [System.Threading.Thread]::CurrentThread.CurrentCulture = $OriginalCulture
