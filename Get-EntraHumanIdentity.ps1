@@ -44,65 +44,102 @@ param (
 )
 
 
-function Initialize-Prerequisites {
-    $requiredPSVersion = [Version]"5.1"
-    $moduleName = "ActiveDirectory"
-
-    if ($PSVersionTable.PSVersion -lt $requiredPSVersion) {
-        Write-Error "PowerShell $requiredPSVersion or higher is required. Current version: $($PSVersionTable.PSVersion)"
-        exit
-    }
-
-    try {
-        if (-not (Get-Module -ListAvailable -Name $moduleName)) {
-            Write-Error "Required module '$moduleName' not found. Please install RSAT: Active Directory Tools."
-            exit
-        }
-        Import-Module $moduleName -ErrorAction Stop
-    } catch {
-        Write-Error "Failed to import '$moduleName'. Ensure it's installed and accessible. $_"
-        exit
-    }
-
-    # Culture preservation
-    $script:OriginalCulture = [System.Globalization.CultureInfo]::CurrentCulture
-    $script:OriginalUICulture = [System.Globalization.CultureInfo]::CurrentUICulture
-
-    [System.Threading.Thread]::CurrentThread.CurrentCulture = 'en-US'
-    [System.Threading.Thread]::CurrentThread.CurrentUICulture = 'en-US'
-
-    Write-Host "Prerequisites validated. Environment initialized." -ForegroundColor Green
-}
-
-Initialize-Prerequisites
-
-# Region: Setup
+# === Logging Setup ===
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $outputPath = ".\EntraReports"
 if (-not (Test-Path $outputPath)) { New-Item -Path $outputPath -ItemType Directory | Out-Null }
-$summary = @()
 
-# Culture fallback
-$script:OriginalCulture = [System.Globalization.CultureInfo]::CurrentCulture
-$script:OriginalUICulture = [System.Globalization.CultureInfo]::CurrentUICulture
-[System.Threading.Thread]::CurrentThread.CurrentCulture = 'en-US'
-[System.Threading.Thread]::CurrentThread.CurrentUICulture = 'en-US'
+$logPath = Join-Path $outputPath "EntraAudit_$timestamp.log"
+function Write-Log {
+    param (
+        [string]$Message,
+        [string]$Level = "INFO"
+    )
+    $formatted = "[{0}] [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level, $Message
+    Add-Content -Path $logPath -Value $formatted
+    Write-Host $Message
+}
 
-# Region: Auth & Retrieval
-Connect-MgGraph -Scopes "User.Read.All", "Directory.Read.All", "Application.Read.All", "AuditLog.Read.All"
+# === Initialization ===
+function Initialize-EntraPrerequisites {
+    $requiredPSVersion = [Version]"5.1"
+    $requiredModules = @(
+        "Microsoft.Graph.Users",
+        "Microsoft.Graph.Applications",
+        "Microsoft.Graph.Identity.DirectoryManagement"
+    )
 
-Write-Host "Fetching Microsoft Entra users..."
-$allUsers = Get-MgUser -All -Property DisplayName, UserPrincipalName, AccountEnabled, SignInActivity |
+    if ($PSVersionTable.PSVersion -lt $requiredPSVersion) {
+        Write-Log "PowerShell $requiredPSVersion or higher is required. Current version: $($PSVersionTable.PSVersion)" "ERROR"
+        exit 1
+    }
+
+    foreach ($module in $requiredModules) {
+        try {
+            if (-not (Get-Module -ListAvailable -Name $module)) {
+                Write-Log "Module '$module' not found. Installing it..." "WARNING"
+                Install-Module $module -Scope CurrentUser -Force
+            }
+            Import-Module $module -ErrorAction Stop
+            Write-Log "Successfully imported module '$module'." "INFO"
+        } catch {
+            Write-Log "Failed to import module '$module'. Ensure it's installed and accessible. $_" "ERROR"
+            exit 1
+        }
+    }
+
+    try {
+        Connect-MgGraph -Scopes "User.Read.All", "Directory.Read.All", "Application.Read.All", "AuditLog.Read.All"
+        if (-not (Get-MgContext)) {
+            Write-Log "Login cancelled or authentication failed. Graph session not established." "ERROR"
+            exit 1
+        } else {
+            Write-Log "Connected to Microsoft Graph successfully." "INFO"
+        }
+    } catch {
+        Write-Log "An error occurred while trying to connect to Microsoft Graph. $_" "ERROR"
+        exit 1
+    }
+
+    # Preserve and enforce culture for consistency
+    $script:OriginalCulture = [System.Globalization.CultureInfo]::CurrentCulture
+    $script:OriginalUICulture = [System.Globalization.CultureInfo]::CurrentUICulture
+    [System.Threading.Thread]::CurrentThread.CurrentCulture = 'en-US'
+    [System.Threading.Thread]::CurrentThread.CurrentUICulture = 'en-US'
+
+    Write-Log "Entra ID prerequisites validated. Environment initialized." "INFO"
+}
+
+# Initialize prerequisites
+Initialize-EntraPrerequisites
+
+# === Paging for Users ===
+Write-Log "Fetching Microsoft Entra users..." "INFO"
+$allUsers = @()
+$page = Get-MgUser -All -Property DisplayName, UserPrincipalName, AccountEnabled, SignInActivity |
     Select-Object DisplayName, UserPrincipalName, AccountEnabled,
         @{Name="LastSignInDate";Expression={$_.SignInActivity.LastSignInDateTime}}
 
-Write-Host "Fetching registered applications..."
+do {
+    $allUsers += $page
+    $nextLink = $page.AdditionalProperties.'@odata.nextLink'
+    if ($nextLink) {
+        $page = Invoke-MgGraphRequest -Method GET -Uri $nextLink
+    } else {
+        break
+    }
+} while ($true)
+
+# === User Audit Logic ===
+$summary = @()
+
+Write-Log "Fetching registered applications..."
 $applications = Get-MgApplication -All | Select-Object DisplayName, AppId
 
-Write-Host "Fetching enterprise applications (service principals)..."
+Write-Log "Fetching enterprise applications (service principals)..."
 $servicePrincipals = Get-MgServicePrincipal -All | Select-Object DisplayName, AppId, AccountEnabled
 
-Write-Host "Fetching Managed Identities..."
+Write-Log "Fetching Managed Identities..."
 $ManagedIdentity = Get-MgServicePrincipal -Filter "servicePrincipalType eq 'ManagedIdentity'"
 
 # Region: User Audit Logic
@@ -158,7 +195,7 @@ $fullExportPath = Join-Path -Path $outputPath -ChildPath $fileName
 
 switch ($Mode) {
     "ByDomain" {
-        Write-Host "Users by Domain Summary" -ForegroundColor Green
+        Write-Log "Users by Domain Summary" -ForegroundColor Green
         $summary | Sort-Object Domain | Format-Table -AutoSize
         $summary | Export-Csv -Path $fullExportPath -NoTypeInformation -Encoding UTF8
     }
@@ -178,7 +215,7 @@ switch ($Mode) {
     }
 }
 
-Write-Host "Report saved to: $fullExportPath" -ForegroundColor Cyan
+Write-Log "Report saved to: $fullExportPath" -ForegroundColor Cyan
 
 # Reset culture
 [System.Threading.Thread]::CurrentThread.CurrentCulture = $OriginalCulture
