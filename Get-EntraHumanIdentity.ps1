@@ -22,17 +22,16 @@ Specifies the output format:
 Number of days since last sign-in to consider a user "inactive" (default = 180).
 
 .EXAMPLE
-.\Entra-Audit.ps1 -UserServiceAccountNamesLike "svc-", "bot-" -Mode Summary -DaysInactive 120
+.\Get-EntraHumanIdentity.ps1 -UserServiceAccountNamesLike "svc-", "bot-" -Mode Summary -DaysInactive 120
 
 .EXAMPLE
-.\Entra-Audit.ps1 -Mode ByDomain
+.\Get-EntraHumanIdentity.ps1 -Mode ByDomain
 
 .OUTPUTS
 CSV files containing a user identity and app inventory snapshot under ./EntraReports/<timestamp>.
 
 .NOTES
 Author: Aymeric Jaouen  
-Adapted from legacy Active Directory audit tooling to support Microsoft Entra-native APIs using Microsoft Graph SDK.
 
 #>
 
