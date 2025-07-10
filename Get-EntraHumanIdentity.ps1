@@ -79,25 +79,17 @@ function Initialize-EntraPrerequisites {
                 Write-Log "Module '$module' not found. Installing it..." "WARNING"
                 Install-Module $module -Scope CurrentUser -Force
             }
-            Import-Module $module -ErrorAction Stop
-            Write-Log "Successfully imported module '$module'." "INFO"
-        } catch {
-            Write-Log "Failed to import module '$module'. Ensure it's installed and accessible. $_" "ERROR"
-            exit 1
-        }
-    }
 
-    try {
-        Connect-MgGraph -Scopes "User.Read.All", "Directory.Read.All", "Application.Read.All", "AuditLog.Read.All"
-        if (-not (Get-MgContext)) {
-            Write-Log "Login cancelled or authentication failed. Graph session not established." "ERROR"
+            if (-not (Get-Module -Name $module)) {
+                Import-Module $module -ErrorAction Stop
+                Write-Log "Successfully imported module '$module'." "INFO"
+            } else {
+                Write-Log "Module '$module' already loaded. Skipping import." "INFO"
+            }
+        } catch {
+            Write-Log "Failed to load module '$module'. $_" "ERROR"
             exit 1
-        } else {
-            Write-Log "Connected to Microsoft Graph successfully." "INFO"
         }
-    } catch {
-        Write-Log "An error occurred while trying to connect to Microsoft Graph. $_" "ERROR"
-        exit 1
     }
 
     # Preserve and enforce culture for consistency
@@ -106,11 +98,32 @@ function Initialize-EntraPrerequisites {
     [System.Threading.Thread]::CurrentThread.CurrentCulture = 'en-US'
     [System.Threading.Thread]::CurrentThread.CurrentUICulture = 'en-US'
 
-    Write-Log "Entra ID prerequisites validated. Environment initialized." "INFO"
+    Write-Log "Entra ID prerequisites validated. Modules Ready." "INFO"
+}
+
+function Connect-EntraGraph {
+    try {
+        if (-not (Get-MgContext)) {
+            Connect-MgGraph -Scopes "User.Read.All", "Directory.Read.All", "Application.Read.All", "AuditLog.Read.All"
+        }
+
+        if (-not (Get-MgContext)) {
+            Write-Log "Login cancelled or authentication failed. Graph session not established." "ERROR"
+            exit 1
+        } else {
+            Write-Log "Connected to Microsoft Graph successfully." "INFO"
+        }
+    } catch {
+        Write-Log "An error occurred while connecting to Microsoft Graph. $_" "ERROR"
+        exit 1
+    }
 }
 
 # Initialize prerequisites
 Initialize-EntraPrerequisites
+
+# Connection to EntraID
+Connect-EntraGraph
 
 # === Paging for Users ===
 Write-Log "Fetching Microsoft Entra users..." "INFO"
