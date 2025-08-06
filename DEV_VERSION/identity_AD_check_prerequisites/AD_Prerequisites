@@ -1,0 +1,256 @@
+<#
+.SYNOPSIS
+    Comprehensive pre‑flight checks for Rubrik Active Directory protection.
+
+.DESCRIPTION
+    Each check is encapsulated in its own function. The Main function invokes each
+    in turn and collects results. Port connectivity tests are now integrated.
+#>
+
+#region Function: Check-PowerShellVersion
+function Check-PowerShellVersion {
+    [OutputType([PSCustomObject])]
+    param (
+        [Version]$MinimumVersion = [Version]"5.1"
+    )
+    $current = $PSVersionTable.PSVersion
+    $status  = if ($current -ge $MinimumVersion) { 'Pass' } else { 'Fail' }
+    [PSCustomObject]@{
+        Check   = 'PowerShell Version'
+        Detail  = "Current: $current; Required: $MinimumVersion"
+        Status  = $status
+    }
+}
+#endregion
+
+#region Function: Check-WindowsServerBackup
+function Check-WindowsServerBackup {
+    [OutputType([PSCustomObject])]
+    $feature = Get-WindowsFeature -Name Windows-Server-Backup -ErrorAction SilentlyContinue
+    $installed = $feature -and $feature.Installed
+    [PSCustomObject]@{
+        Check   = 'Windows Server Backup'
+        Detail  = if ($installed) { 'Installed' } else { 'Not Installed' }
+        Status  = if ($installed) { 'Pass' } else { 'Fail' }
+    }
+}
+#endregion
+
+#region Function: Check-gMSAGroupMemberships
+function Check-gMSAGroupMemberships {
+    [OutputType([PSCustomObject])]
+    param (
+        [Parameter(Mandatory)] [string]$gMSAName,
+        [string[]]$RequiredGroups = @('Backup Operators','Server Operators','Domain Computers')
+    )
+    try {
+        $gMSA = Get-ADServiceAccount -Identity $gMSAName -ErrorAction Stop
+        $dn   = $gMSA.DistinguishedName
+        $memberships = Get-ADGroup -Filter * | ForEach-Object {
+            if ((Get-ADGroupMember $_ -Recursive | Where-Object DistinguishedName -EQ $dn)) {
+                $_.Name
+            }
+        }
+        foreach ($grp in $RequiredGroups) {
+            [PSCustomObject]@{
+                Check   = "gMSA Membership: $grp"
+                Detail  = if ($memberships -contains $grp) { 'Member' } else { 'Not a Member' }
+                Status  = if ($memberships -contains $grp) { 'Pass' } else { 'Fail' }
+            }
+        }
+    } catch {
+        [PSCustomObject]@{
+            Check   = 'gMSA Lookup'
+            Detail  = "Error finding gMSA '$gMSAName': $_"
+            Status  = 'Fail'
+        }
+    }
+}
+#endregion
+
+#region Function: Check-FolderPermissions
+function Check-FolderPermissions {
+    [OutputType([PSCustomObject])]
+    param (
+        [Parameter(Mandatory)] [string]$gMSAName,
+        [string[]]$Paths = @('C:\ProgramData\Rubrik','C:\Program Files\Rubrik')
+    )
+    foreach ($path in $Paths) {
+        if (-not (Test-Path $path)) {
+            yield [PSCustomObject]@{
+                Check   = "Folder Exists: $path"
+                Detail  = 'Path does not exist'
+                Status  = 'Fail'
+            }
+            continue
+        }
+        $acl = Get-Acl $path
+        $hasFC = $false
+        foreach ($ace in $acl.Access) {
+            if ($ace.IdentityReference -like "*$gMSAName" -and $ace.FileSystemRights -band [io.fileSystemRights]::FullControl) {
+                $hasFC = $true
+                break
+            }
+        }
+        yield [PSCustomObject]@{
+            Check   = "Folder Permission: $path"
+            Detail  = if ($hasFC) { "$gMSAName has FullControl" } else { "$gMSAName lacks FullControl" }
+            Status  = if ($hasFC) { 'Pass' } else { 'Fail' }
+        }
+    }
+}
+#endregion
+
+#region Function: Check-VCRedistributable
+function Check-VCRedistributable {
+    [OutputType([PSCustomObject])]
+    param (
+        [Version]$MinimumVersion = [Version]"14.40.0.0"
+    )
+    $pkgs = Get-Package -Name 'Microsoft Visual C++*Redistributable*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Version -ge \$MinimumVersion -and $_.Name -match '2015|2017|2019|2022' }
+    if (\$pkgs) {
+        foreach (\$pkg in \$pkgs) {
+            yield [PSCustomObject]@{
+                Check   = 'VC++ Redistributable'
+                Detail  = "\$($pkg.Name) v\$($pkg.Version)"
+                Status  = 'Pass'
+            }
+        }
+    } else {
+        [PSCustomObject]@{
+            Check   = 'VC++ Redistributable'
+            Detail  = "No package ≥ \$MinimumVersion found"
+            Status  = 'Fail'
+        }
+    }
+}
+#endregion
+
+#region Function: Check-RBAHash
+function Check-RBAHash {
+    [OutputType([PSCustomObject])]
+    param (
+        [string]$Path = 'C:\Program Files\Rubrik\Rubrik Backup Service\rba.exe'
+    )
+    if (-not (Test-Path \$Path)) {
+        [PSCustomObject]@{
+            Check   = 'RBA.exe Exists'
+            Detail  = "Not found at \$Path"
+            Status  = 'Fail'
+        }
+        return
+    }
+    try {
+        \$h1 = (Get-FileHash -Path \$Path -Algorithm SHA1).Hash
+        \$h2 = (Get-FileHash -Path \$Path -Algorithm SHA256).Hash
+        [PSCustomObject]@{
+            Check   = 'RBA Hash'
+            Detail  = "SHA1: \$h1`nSHA256: \$h2"
+            Status  = 'Info'
+        }
+    } catch {
+        [PSCustomObject]@{
+            Check   = 'RBA Hash'
+            Detail  = "Error computing hash: \$_"
+            Status  = 'Fail'
+        }
+    }
+}
+#endregion
+
+#region Function: Check-PortConnectivity
+function Check-PortConnectivity {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ComputerName,
+
+        [Parameter(Mandatory)]
+        [int[]]$Ports,
+
+        [ValidateSet('TCP','UDP','Both')]
+        [string]$Protocol = 'TCP'
+    )
+
+    foreach (\$port in \$Ports) {
+        if (\$Protocol -in @('TCP','Both')) {
+            \$tcp = Test-NetConnection -ComputerName \$ComputerName -Port \$port -WarningAction SilentlyContinue
+            \$status = if (\$tcp.TcpTestSucceeded) { 'Pass' } else { 'Fail' }
+            [PSCustomObject]@{
+                Check  = "TCP \$ComputerName:\$port"
+                Detail = "TcpTestSucceeded = \$($tcp.TcpTestSucceeded)"
+                Status = \$status
+            }
+        }
+        if (\$Protocol -in @('UDP','Both')) {
+            try {
+                \$client   = New-Object System.Net.Sockets.UdpClient
+                \$endpoint = New-Object System.Net.IPEndPoint(
+                              [System.Net.IPAddress]::Parse(\$ComputerName), \$port)
+                \$client.Send(@(), 0, \$endpoint) | Out-Null
+                \$client.Close()
+                \$udpStatus = 'Info'
+                \$detail    = 'UDP packet sent without error'
+            } catch {
+                \$udpStatus = 'Warning'
+                \$detail    = "UDP send failed: \$($_.Exception.Message)"
+            }
+            [PSCustomObject]@{
+                Check  = "UDP \$ComputerName:\$port"
+                Detail = \$detail
+                Status = \$udpStatus
+            }
+        }
+    }
+}
+#endregion
+
+#region Function: Main
+function Main {
+    param (
+        [Parameter(Mandatory)] [string]\$gMSAName,
+        [Parameter()]
+        [PSObject[]]\$PortTests = @(
+            @{ ComputerName = 'ad01.corp.local'; Ports = @(88,389,445,464,636,3268,3269) },
+            @{ ComputerName = 'rubrik-node01'; Ports = @(12800,12801) }
+        )
+    )
+    \$results = @()
+
+    # 1. PowerShell version
+    \$results += Check-PowerShellVersion
+
+    # 2. Windows Server Backup
+    \$results += Check-WindowsServerBackup
+
+    # 3. gMSA group memberships
+    \$results += Check-gMSAGroupMemberships -gMSAName \$gMSAName
+
+    # 4. Folder permissions
+    \$results += Check-FolderPermissions -gMSAName \$gMSAName
+
+    # 5. VC++ Redistributable
+    \$results += Check-VCRedistributable
+
+    # 6. RBA.exe hash
+    \$results += Check-RBAHash
+
+    # 7. Port connectivity tests
+    foreach (\$test in \$PortTests) {
+        \$results += Check-PortConnectivity -ComputerName \$test.ComputerName -Ports \$test.Ports -Protocol Both
+    }
+
+    # Output results as table
+    \$results | Format-Table -AutoSize
+
+    # Optionally export to CSV:
+    # \$results | Export-Csv -Path '.\RubrikADPrereqs.csv' -NoTypeInformation
+}
+#endregion
+
+# If script is run directly, invoke Main
+if (\$MyInvocation.PSScriptRoot -eq (Get-Location).Path) {
+    Main -gMSAName '<YourGMSANameHere>'
+}
