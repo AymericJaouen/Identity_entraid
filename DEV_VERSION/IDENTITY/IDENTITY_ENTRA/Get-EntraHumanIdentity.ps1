@@ -15,11 +15,9 @@ An array of wildcard string patterns (e.g., 'svc-', 'bot-', 'app-') used to flag
 
 .PARAMETER Mode
 Specifies the output format:
-- 'ByDomain': A CSV report grouped by user domain suffix (e.g., @contoso.com).
-- 'ByUser': A detailed CSV report for each user, including ownership details.
-- 'Summary': A single-line CSV report with tenant-wide totals for key metrics.
-- 'Html': A single, comprehensive HTML file with all report information (Summary, ByDomain, ByUser).
-- 'Full': Generates all four report formats (Summary, ByDomain, ByUser, and Html) as separate files.
+- 'ByDomain': A CSV report grouped by user domain suffix (e.g., @contoso.com). Export as HTML
+- 'ByUser': A detailed CSV report for each user, including ownership details. Export as HTML
+- 'Full': Generates all 2 reports (ByDomain, ByUser) as separate files. Export as HTML
 
 .PARAMETER DaysInactive
 Number of days since the last sign-in to consider a user "inactive." The default is 180 days.
@@ -53,7 +51,7 @@ Author: Aymeric Jaouen
 
 param (
     [string[]]$UserServiceAccountNamesLike = @(),
-    [ValidateSet("ByDomain", "ByUser", "Summary", "Full", "Html")]
+    [ValidateSet("ByDomain", "ByUser", "Full")]
     [string]$Mode = "Full",
     [int]$DaysInactive = 180
 )
@@ -259,209 +257,212 @@ $globalSummary = [PSCustomObject]@{
 }
 
 # === Report Generation Functions ===
-
-function Export-ByDomainReport {
+function Get-ReportHeaders {
     param (
-        [string]$OutputPath,
-        [string]$Timestamp,
-        $Summary, # Removed [ordered]
-        [PSCustomObject]$GlobalSummary
+        [ValidateSet("ByUser", "ByDomain")]
+        [string]$ReportType
     )
-    Write-Log "Generating 'ByDomain' report..." "INFO" "Cyan"
-    
-    $fileName = "Entra_Audit_ByDomain_$timestamp.csv"
-    $fullExportPath = Join-Path -Path $OutputPath -ChildPath $fileName
-    
-    $domainReport = @()
-    foreach ($key in $Summary.Keys) {
-        $domainReport += $Summary[$key]
-    }
-    
-    if ($domainReport.Count -gt 0) {
-        $domainReport[0] | Add-Member -MemberType NoteProperty -Name 'Applications' -Value $GlobalSummary.Applications
-        $domainReport[0] | Add-Member -MemberType NoteProperty -Name 'EnterpriseApps' -Value $GlobalSummary.EnterpriseApps
-        $domainReport[0] | Add-Member -MemberType NoteProperty -Name 'ManagedIdentities' -Value $GlobalSummary.ManagedIdentities
-    }
 
-    $domainReport | Export-Csv -Path $fullExportPath -NoTypeInformation -Encoding UTF8
-    Write-Log "ByDomain report saved to: $fullExportPath" "INFO" "Green"
-}
-
-function Export-ByUserReport {
-    param (
-        [string]$OutputPath,
-        [string]$Timestamp,
-        [PSObject[]]$AllUsers,
-        [PSObject[]]$UserReports
-    )
-    Write-Log "Generating 'ByUser' report..." "INFO" "Cyan"
-    
-    $fileName = "Entra_Audit_ByUser_$timestamp.csv"
-    $fullExportPath = Join-Path -Path $OutputPath -ChildPath $fileName
-
-    # This loop is placed here because ownership data is only needed for the ByUser report
-    foreach ($user in $AllUsers) {
-        $userReportEntry = $UserReports | Where-Object { $_.User -eq ($user.UserPrincipalName -split '@')[0] }
-        
-        if ($userReportEntry) {
-            $ownedObjects = Get-MgUserOwnedObject -UserId $user.Id -All
-            
-            $userReportEntry.OwnedApps = ($ownedObjects | Where-Object { $_.'@odata.type' -eq '#microsoft.graph.application' }).Count
-            $userReportEntry.OwnedServicePrincipals = ($ownedObjects | Where-Object { $_.'@odata.type' -eq '#microsoft.graph.servicePrincipal' }).Count
-            $userReportEntry.OwnedManagedIdentities = ($ownedObjects | Where-Object { $_.'@odata.type' -eq '#microsoft.graph.servicePrincipal' -and $_.ServicePrincipalType -eq 'ManagedIdentity' }).Count
+    switch ($ReportType) {
+        "ByUser" {
+            return @(
+                @{Name='Directory'; Expression={ $_.Directory }},
+                @{Name='User'; Expression={ $_.User }},
+                @{Name='Account Enabled'; Expression={ $_.AccountEnabled }},
+                @{Name='Active Users'; Expression={ $_.ActiveUser }},
+                @{Name='Inactive Users'; Expression={ $_.InactiveUser }},
+                @{Name='Never Logged In'; Expression={ $_.NeverLoggedInUser }},
+                @{Name='Service Account Pattern'; Expression={ $_.PatternMatchedUsers }},
+                @{Name='Synch from AD'; Expression={ $_.SyncFromAD }},
+                @{Name='Source AD'; Expression={ $_.ADSourceDomain }},
+                @{Name='App owned by User'; Expression={ $_.OwnedApps }},
+                @{Name='SP owned by User'; Expression={ $_.OwnedServicePrincipals }},
+                @{Name='Managed Identity'; Expression={ $_.OwnedManagedIdentities }}
+            )
+        }
+        "ByDomain" {
+            return @(
+                @{Name='Directory'; Expression={ $_.Domain }},
+                @{Name='Users'; Expression={ $_.TotalUsers }},
+                @{Name='Active Users'; Expression={ $_.ActiveUsers }},
+                @{Name='Inactive Users'; Expression={ $_.InactiveUsers }},
+                @{Name='Never Logged In'; Expression={ $_.NeverLoggedInUsers }},
+                @{Name='Service Account Pattern'; Expression={ $_.PatternMatchedUsers }},
+                @{Name='Apps'; Expression={ $_.Applications }},
+                @{Name='SP'; Expression={ $_.EnterpriseApps }},
+                @{Name='Managed Identity'; Expression={ $_.ManagedIdentities }}
+            )
         }
     }
-
-    $UserReports | Select-Object Directory, User, AccountEnabled, ActiveUser, InactiveUser, NeverLoggedInUser, PatternMatchedUser, SyncFromAD, ADSourceDomain, OwnedApps, OwnedServicePrincipals, OwnedManagedIdentities | Export-Csv -Path $fullExportPath -NoTypeInformation -Encoding UTF8
-    Write-Log "ByUser report saved to: $fullExportPath" "INFO" "Green"
 }
 
-function Export-SummaryReport {
+function Export-CustomFormattedUserReport {
     param (
-        [string]$OutputPath,
-        [string]$Timestamp,
-        $Summary, # Removed [ordered]
-        [PSCustomObject]$GlobalSummary
+        [Parameter(Mandatory = $true)] [string]$OutputPath,
+        [Parameter(Mandatory = $true)] [string]$Timestamp,
+        [Parameter(Mandatory = $true)] [object[]]$UserReports,
+        [Parameter(Mandatory = $true)] [object[]]$Headers
     )
-    Write-Log "Generating 'Summary' report..." "INFO" "Cyan"
-    
-    $fileName = "Entra_Audit_Summary_$timestamp.csv"
+
+    $fileName = "Entra_Audit_CustomUserReport_$Timestamp.html"
     $fullExportPath = Join-Path -Path $OutputPath -ChildPath $fileName
 
-    $totalUsers = 0
-    $activeUsers = 0
-    $inactiveUsers = 0
-    $neverLoggedInUsers = 0
-    $patternMatchedUsers = 0
+    $htmlBody = @"
+<style>
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+    th { background-color: #3498db; color: white; }
+    tr:nth-child(even) { background-color: #f2f2f2; }
+</style>
+<h2>Détail utilisateur enrichi</h2>
+<table>
+    <tr>
+"@
 
-    foreach ($domainSummary in $Summary.Values) {
-        $totalUsers += $domainSummary.TotalUsers
-        $activeUsers += $domainSummary.ActiveUsers
-        $inactiveUsers += $domainSummary.InactiveUsers
-        $neverLoggedInUsers += $domainSummary.NeverLoggedInUsers
-        $patternMatchedUsers += $domainSummary.PatternMatchedUsers
+    foreach ($header in $Headers) {
+        $htmlBody += "<th>$($header.Name)</th>"
+    }
+    $htmlBody += "</tr>"
+
+    foreach ($report in $UserReports) {
+        $htmlBody += "<tr>"
+        foreach ($col in $Headers) {
+            try {
+                $value = if ($col.Expression -is [ScriptBlock]) {
+                    & $col.Expression.Invoke($report)
+                } elseif ($col.Expression -is [string]) {
+                    $report.$($col.Expression)
+                } else {
+                    $col.Expression
+                }
+            } catch {
+                Write-Warning "Erreur lors de l’évaluation de $($col.Name): $_"
+                $value = "[Erreur]"
+            }
+
+            $htmlBody += "<td>$value</td>"
+        }
+        $htmlBody += "</tr>"
     }
 
-    $total = [PSCustomObject]@{
-        TotalUsers            = $totalUsers
-        ActiveUsers           = $activeUsers
-        InactiveUsers         = $inactiveUsers
-        NeverLoggedInUsers    = $neverLoggedInUsers
-        PatternMatchedUsers   = $patternMatchedUsers
-        Applications          = $GlobalSummary.Applications
-        EnterpriseApps        = $GlobalSummary.EnterpriseApps
-        ManagedIdentities     = $GlobalSummary.ManagedIdentities
-    }
-    
-    $total | Export-Csv -Path $fullExportPath -NoTypeInformation -Encoding UTF8
-    Write-Log "Summary report saved to: $fullExportPath" "INFO" "Green"
+    $htmlBody += "</table>"
+    $htmlBody | Out-File -FilePath $fullExportPath -Encoding UTF8
+
+    Write-Host "✔ Rapport HTML utilisateur exporté vers: $fullExportPath" -ForegroundColor Green
 }
 
-function Export-HtmlReport {
+# Export the custom formatted report
+function Export-CustomFormattedDomainReport {
+    param (
+        [Parameter(Mandatory = $true)] [string]$OutputPath,
+        [Parameter(Mandatory = $true)] [string]$Timestamp,
+        [Parameter(Mandatory = $true)] [object[]]$DomainReports,
+        [Parameter(Mandatory = $true)] [object[]]$Headers
+    )
+
+    $fileName = "Entra_Audit_CustomDomainReport_$Timestamp.html"
+    $fullExportPath = Join-Path -Path $OutputPath -ChildPath $fileName
+
+    $htmlBody = @"
+<style>
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+    th { background-color: #2c3e50; color: white; }
+    tr:nth-child(even) { background-color: #f9f9f9; }
+</style>
+<h2>Résumé par domaine enrichi</h2>
+<table>
+    <tr>
+"@
+
+    foreach ($header in $Headers) {
+        $htmlBody += "<th>$($header.Name)</th>"
+    }
+    $htmlBody += "</tr>"
+
+    foreach ($report in $DomainReports) {
+        $htmlBody += "<tr>"
+        foreach ($col in $Headers) {
+            try {
+                $value = if ($col.Expression -is [ScriptBlock]) {
+                    & $col.Expression.Invoke($report)
+                } elseif ($col.Expression -is [string]) {
+                    $report.$($col.Expression)
+                } else {
+                    $col.Expression
+                }
+            } catch {
+                Write-Warning "Erreur lors de l’évaluation de $($col.Name): $_"
+                $value = "[Erreur]"
+            }
+
+            $htmlBody += "<td>$value</td>"
+        }
+        $htmlBody += "</tr>"
+    }
+
+    $htmlBody += "</table>"
+    $htmlBody | Out-File -FilePath $fullExportPath -Encoding UTF8
+
+    Write-Host "✔ Rapport HTML domaine exporté vers: $fullExportPath" -ForegroundColor Green
+}
+
+function Export-CustomFormattedFullReport {
     param (
         [string]$OutputPath,
         [string]$Timestamp,
         $Summary,
         [PSCustomObject]$GlobalSummary,
-        [PSObject[]]$AllUsers,
         [PSObject[]]$UserReports
     )
-    Write-Log "Generating 'HTML' report..." "INFO" "Cyan"
 
-    $fileName = "Entra_Audit_Report_$timestamp.html"
-    $fullExportPath = Join-Path -Path $OutputPath -ChildPath $fileName
-
-    # 1. Create the Summary table data
-    $total = [PSCustomObject]@{
-        TotalUsers            = ($Summary.Values | Measure-Object TotalUsers -Sum).Sum
-        ActiveUsers           = ($Summary.Values | Measure-Object ActiveUsers -Sum).Sum
-        InactiveUsers         = ($Summary.Values | Measure-Object InactiveUsers -Sum).Sum
-        NeverLoggedInUsers    = ($Summary.Values | Measure-Object NeverLoggedInUsers -Sum).Sum
-        PatternMatchedUsers   = ($Summary.Values | Measure-Object PatternMatchedUsers -Sum).Sum
-        Applications          = $GlobalSummary.Applications
-        EnterpriseApps        = $GlobalSummary.EnterpriseApps
-        ManagedIdentities     = $GlobalSummary.ManagedIdentities
-    }
-    $summaryHtml = $total | ConvertTo-Html -Fragment -Property TotalUsers, ActiveUsers, InactiveUsers, NeverLoggedInUsers, PatternMatchedUsers, Applications, EnterpriseApps, ManagedIdentities
-
-    # 2. Create the ByDomain table data
-    $domainReport = @()
-    foreach ($key in $Summary.Keys) {
-        $domainReport += $Summary[$key]
-    }
-    $domainHtml = $domainReport | Sort-Object Domain | ConvertTo-Html -Fragment
-
-    # 3. Create the ByUser table data
-    # This loop is placed here because ownership data is only needed for the HTML/ByUser reports
-    foreach ($user in $AllUsers) {
-        $userReportEntry = $UserReports | Where-Object { $_.User -eq ($user.UserPrincipalName -split '@')[0] }
-        
-        if ($userReportEntry) {
-            $ownedObjects = Get-MgUserOwnedObject -UserId $user.Id -All
-            
-            $userReportEntry.OwnedApps = ($ownedObjects | Where-Object { $_.'@odata.type' -eq '#microsoft.graph.application' }).Count
-            $userReportEntry.OwnedServicePrincipals = ($ownedObjects | Where-Object { $_.'@odata.type' -eq '#microsoft.graph.servicePrincipal' }).Count
-            $userReportEntry.OwnedManagedIdentities = ($ownedObjects | Where-Object { $_.'@odata.type' -eq '#microsoft.graph.servicePrincipal' -and $_.ServicePrincipalType -eq 'ManagedIdentity' }).Count
-        }
-    }
-    # Select a subset of columns for the HTML table and exclude LastSignInDate
-    $userReportHtml = $UserReports | Select-Object Directory, User, AccountEnabled, ActiveUser, InactiveUser, NeverLoggedInUser, SyncFromAD, ADSourceDomain, OwnedApps, OwnedServicePrincipals, OwnedManagedIdentities | ConvertTo-Html -Fragment
-    
-    # 4. Assemble the final HTML file
-    $htmlBody = @"
-    <style>
-    body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f9; color: #333; }
-    h1, h2 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 5px; }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; box-shadow: 0 2px 3px rgba(0,0,0,0.1); }
-    th, td { text-align: left; padding: 12px; border: 1px solid #ddd; }
-    th { background-color: #3498db; color: white; font-weight: bold; }
-    tr:nth-child(even) { background-color: #f2f2f2; }
-    tr:hover { background-color: #e9e9e9; }
-    .note { font-style: italic; color: #7f8c8d; margin-top: 20px; }
-    </style>
-
-    <h1>Microsoft Entra ID Audit Report for RUBRIK Engineer</h1>
-    <p>Report generated on: $(Get-Date)</p>
-
-    <h2>Tenant-wide Summary</h2>
-    $summaryHtml
-
-    <h2>Users by Domain</h2>
-    $domainHtml
-    
-    <h2>User Ownership and Activity Details</h2>
-    $userReportHtml
-
-    <p class="note">Note: This is a snapshot of the Entra ID tenant at the time of report generation.</p>
-"@
-    
-    $htmlBody | Out-File -FilePath $fullExportPath -Encoding UTF8
-    Write-Log "HTML report saved to: $fullExportPath" "INFO" "Green"
+    Export-CustomFormattedDomainReport -OutputPath $outputPath -Timestamp $timestamp -DomainSummaries $summary -GlobalSummary $globalSummary -Headers $domainHeaders
+    Export-CustomFormattedUserReport -OutputPath $outputPath -Timestamp $timestamp -UserReports $userReports -Headers $reportHeaders
 }
 
 # === Main Script Logic ===
 Write-Log "Starting report generation..." "INFO" "Green"
 
+$reportHeaders  = Get-ReportHeaders -ReportType "ByUser"
+$domainHeaders  = Get-ReportHeaders -ReportType "ByDomain"
+
+# === Header definitions ===
+$HeadersByUser = @(
+    @{ Name = "Directory";               Expression = "Directory" }
+    @{ Name = "User";                    Expression = "User" }
+    @{ Name = "Account Enabled";         Expression = "AccountEnabled" }
+    @{ Name = "Active Users";            Expression = "ActiveUser" }
+    @{ Name = "Inactive Users";          Expression = "InactiveUser" }
+    @{ Name = "Never Logged In";         Expression = "NeverLoggedInUser" }
+    @{ Name = "Service Account Pattern"; Expression = "PatternMatchedUser" }
+    @{ Name = "Synch from AD";           Expression = "SyncFromAD" }
+    @{ Name = "Source AD";               Expression = "ADSourceDomain" }
+    @{ Name = "App owned by User";       Expression = "OwnedApps" }
+    @{ Name = "SP owned by User";        Expression = "OwnedServicePrincipals" }
+    @{ Name = "Managed Identity";        Expression = "OwnedManagedIdentities" }
+)
+
+$HeadersByDomain = @(
+    @{ Name = "Domain";              Expression = "Domain" }
+    @{ Name = "Total Users";         Expression = "TotalUsers" }
+    @{ Name = "Active Users";        Expression = "ActiveUsers" }
+    @{ Name = "Inactive Users";      Expression = "InactiveUsers" }
+    @{ Name = "Never Logged In";     Expression = "NeverLoggedInUsers" }
+    @{ Name = "Pattern Matched";     Expression = "PatternMatchedUsers" }
+    @{ Name = "Applications";        Expression = "Applications" }
+    @{ Name = "Enterprise Apps";     Expression = "EnterpriseApps" }
+    @{ Name = "Managed Identities";  Expression = "ManagedIdentities" }
+)
+
 switch ($Mode) {
-    "ByDomain" {
-        Export-ByDomainReport -OutputPath $outputPath -Timestamp $timestamp -Summary $summary -GlobalSummary $globalSummary
-    }
     "ByUser" {
-        Export-ByUserReport -OutputPath $outputPath -Timestamp $timestamp -AllUsers $allUsers -UserReports $userReports
+        Export-CustomFormattedUserReport -OutputPath $outputPath -Timestamp $timestamp -UserReports $userReports -Headers $HeadersByUser
     }
-    "Summary" {
-        Export-SummaryReport -OutputPath $outputPath -Timestamp $timestamp -Summary $summary -GlobalSummary $globalSummary
-    }
-    "Html" {
-        Export-HtmlReport -OutputPath $outputPath -Timestamp $timestamp -Summary $summary -GlobalSummary $globalSummary -AllUsers $allUsers -UserReports $userReports
+    "ByDomain" {
+        Export-CustomFormattedDomainReport -OutputPath $outputPath -Timestamp $timestamp -DomainReports $domainReport -Headers $HeadersByDomain
     }
     "Full" {
-        Write-Log "Generating 'Full' audit (Summary, ByDomain, ByUser, and HTML reports)..." "INFO" "Magenta"
-        
-        Export-SummaryReport -OutputPath $outputPath -Timestamp $timestamp -Summary $summary -GlobalSummary $globalSummary
-        Export-ByDomainReport -OutputPath $outputPath -Timestamp $timestamp -Summary $summary -GlobalSummary $globalSummary
-        Export-ByUserReport -OutputPath $outputPath -Timestamp $timestamp -AllUsers $allUsers -UserReports $userReports
-        Export-HtmlReport -OutputPath $outputPath -Timestamp $timestamp -Summary $summary -GlobalSummary $globalSummary -AllUsers $allUsers -UserReports $userReports
+        Export-CustomFormattedFullReport -OutputPath $outputPath -Timestamp $timestamp -Summary $summary -GlobalSummary $globalSummary -UserReports $userReports
     }
 }
 
