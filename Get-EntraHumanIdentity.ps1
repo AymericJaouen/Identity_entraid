@@ -16,14 +16,13 @@ Full Report with Ownership Check
 The following command runs the script in Full mode, checks for users inactive for 180 days, identifies service accounts with names starting with "svc-" or "sa-", and performs the ownership check.
 
 PowerShell
-
-.\EntraID-ReportGenerator.ps1 -Mode Full -DaysInactive 180 -UserServiceAccountNamesLike "svc-", "sa-" -CheckOwnership
+.\Get-EntraHumanIdentity.ps1 -Mode Full -DaysInactive 180 -UserServiceAccountNamesLike "svc-", "sa-" -CheckOwnership
 Summary Report
+
 This command runs the script in Summary mode, which only generates the aggregated domain report.
 
 PowerShell
-
-.\EntraID-ReportGenerator.ps1 -Mode Summary
+.\Get-EntraHumanIdentity.ps1 -Mode Summary
 #>
 
 param (
