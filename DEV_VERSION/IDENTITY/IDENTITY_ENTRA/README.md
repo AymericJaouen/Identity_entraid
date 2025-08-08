@@ -1,83 +1,71 @@
-# Entra Human Identity Audit Script
+Get-EntraHumanIdentity.ps1
 
-A powerful PowerShell script for auditing human identities and applications in a Microsoft Entra ID (formerly Azure AD) tenant. This tool provides a comprehensive overview of user activity, synchronization status, and application ownership in multiple output formats to help Rubrik SE understand your environnement
+PowerShell script designed to generate detailed and customizable reports on your Entra ID (formerly Azure Active Directory) environment. This tool connects to Microsoft Graph, retrieves critical user, application, and service principal data, and presents it in a clear, accessible format.
 
-## ✨ Features
+Key Features 🛠️
+This script is a reporting solution with the following capabilities:
 
-- **User Activity Metrics:** Categorizes users as active, inactive, or never logged in based on a configurable inactivity period.
-- **Service Account Detection:** Flags potential service accounts using customizable wildcard naming patterns.
-- **On-Premises Synchronization:** Identifies users synchronized from on-premises Active Directory and reports the source domain.
-- **Application Ownership:** Audits user ownership of Enterprise Applications, Managed Identities, and App Registrations.
-- **Flexible Reporting:** Generates multiple output formats to suit different needs:
-    - **Summary:** A high-level, tenant-wide overview.
-    - **By Domain:** A breakdown of user metrics grouped by email domain.
-    - **By User:** A detailed, per-user report with all collected information.
-    - **HTML:** A single, comprehensive HTML file combining all reports into a professional, easily shareable format.
-- **Full Audit Mode:** The `Full` mode automates the generation of all available reports with a single command.
+Flexible Reporting Modes: Choose between a Full report, which details every user, or a Summary report, which aggregates data by domain for a high-level overview.
 
-## 🚀 Getting Started
+Users Reporting: Automatically categorizes users as Active, Inactive, or Never Logged In based on a configurable inactivity period.
 
-### Prerequisites
+Service Account Identification: Identify service accounts by providing common naming patterns, helping you quickly filter out administrative accounts from user-facing reports.
 
-- PowerShell 5.1 or newer.
-- An account with the necessary permissions in Microsoft Entra ID to read user and application data (e.g., Global Reader, Global Administrator, or a custom role with `User.Read.All`, `Directory.Read.All`, and `Application.Read.All` scopes).
-- The `Microsoft.Graph` PowerShell modules (`Microsoft.Graph.Users`, `Microsoft.Graph.Applications`, `Microsoft.Graph.Identity.DirectoryManagement`). The script will attempt to install these automatically if they are missing.
+Ownership Analysis: When enabled, the script performs a deep dive to count the number of applications and service principals owned by each user
 
-### Installation
+Self-Contained HTML Reports: Generates single-file HTML reports
 
-1.  Clone this repository or download the `Get-EntraHumanIdentity.ps1` script.
-2.  Open PowerShell as an administrator.
-3.  Set the execution policy to allow scripts: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
-4.  Navigate to the directory where the script is located.
+Logging: All actions and potential errors are logged to a dedicated file
 
-### Usage
+Prerequisites
+This script requires a modern version of PowerShell (v5.1 or newer) and an internet connection to install the necessary Microsoft Graph modules on first run if needed
 
-The script connects to your Microsoft Entra ID tenant using `Connect-MgGraph`. It will prompt you for authentication if a session is not already active.
+Installation & Usage
+Simply download the .ps1 file to your machine. The script will automatically check for and install the required PowerShell modules when you run it for the first time:
+        "Microsoft.Graph.Users",
+        "Microsoft.Graph.Applications",
+        "Microsoft.Graph.Identity.DirectoryManagement"
 
-```powershell
-.\Get-EntraHumanIdentity.ps1 [-UserServiceAccountNamesLike <string[]>] [-Mode <string>] [-DaysInactive <int>]
+Example 1: Full Report with Ownership Check
+This command generates a full report for all users, including the time-consuming ownership check for applications and service principals. It also identifies service accounts that have "svc-" or "sa-" in their User Principal Name (UPN).
+
+PowerShell
+
+.\Get-EntraHumanIdentity.ps1 -Mode Full -DaysInactive 180 -UserServiceAccountNamesLike "svc-", "sa-" -CheckOwnership
+Example 2: Summary Report Only
+This command runs the script in Summary mode, which is faster as it only generates the aggregated domain report.
+
+PowerShell
+
+.\Get-EntraHumanIdentity.ps1 -Mode Summary
+Example 3: Full Report without Ownership
+This command runs the script in Full mode, focusing on user activity and identifying service accounts without performing the detailed ownership analysis.
+
+PowerShell
+
+.\Get-EntraHumanIdentity.ps1 -Mode Full -DaysInactive 90 -UserServiceAccountNamesLike "svc-", "sa-"
 Parameters
-UserServiceAccountNamesLike: An array of wildcard patterns (e.g., 'svc-', 'app-') to flag accounts as potential service users.
+Parameter	Type	Default	Description
+UserServiceAccountNamesLike	string[]	None	An array of strings used to identify service accounts by matching patterns in their UPN.
+Mode	string	"Full"	Specifies the report type. Options are "Full" or "Summary".
+DaysInactive	int	180	The number of days of inactivity to check for when identifying inactive users.
+CheckOwnership	switch	None	When present, the script performs additional, more time-consuming calls to count the number of applications and service principals owned by each user.
 
-Mode: Specifies the output format. Valid values are ByDomain, ByUser, Summary, Html, and Full. Defaults to ByDomain.
+Exporter vers Sheets
+Output
+The script creates a dedicated folder named EntraReports in the same directory it's executed from. Inside, you will find:
 
-DaysInactive: The number of days after which a user with no sign-in activity is considered inactive. Defaults to 180.
+CSV Files: Detailed CSV files for each report, which can be easily imported into Excel or other data analysis tools.
 
-💡 Examples
-1. Generate a Summary Report with Custom Inactivity Period
-This example creates a quick summary report and considers users inactive after 90 days of no sign-in.
+HTML Files: A single-file HTML report ready for sharing or archival.
 
-PowerShell
+Log File: An audit log of the script's execution, named EntraAudit_YYYYMMDD_HHMMSS.log, for easy troubleshooting.
 
-.\Get-EntraHumanIdentity.ps1 -Mode Summary -DaysInactive 90
-2. Generate a Detailed Per-User Report
-This command creates a detailed CSV report for every user, including application ownership, and also flags accounts matching 'svc-' or 'bot-'.
+Customization
+The HTML report's appearance can be customized by editing the CSS styles or replacing the Base64-encoded SVG logo data directly within the Export-HtmlReport function.
 
-PowerShell
-
-.\Get-EntraHumanIdentity.ps1 -Mode ByUser -UserServiceAccountNamesLike "svc-", "bot-"
-3. Generate a Comprehensive HTML Report
-This generates a single HTML file that contains a summary table, a domain-based table, and a detailed user table.
-
-PowerShell
-
-.\Get-EntraHumanIdentity.ps1 -Mode Html
-4. Run a Full Audit
-This is the most comprehensive option, which generates all four reports (Summary, ByDomain, ByUser, and HTML) with a single command.
-
-PowerShell
-
-.\Get-EntraHumanIdentity.ps1 -Mode Full
-📂 Output
-All generated reports are saved in a subdirectory named EntraReports in the same location as the script. Each file is automatically timestamped for easy version control.
-
-Entra_Audit_Summary_<timestamp>.csv
-
-Entra_Audit_ByDomain_<timestamp>.csv
-
-Entra_Audit_ByUser_<timestamp>.csv
-
-Entra_Audit_Report_<timestamp>.html
-
-📄 License
+License
 This project is licensed under the MIT License.
+
+Author
+Aymeric Jaouen
