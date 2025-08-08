@@ -1,19 +1,29 @@
 <#
-.SYNOPSIS
-  Full (“ByUser”) and Summary (“ByDomain”) Entra ID report.
+Synopsis
+The script is a PowerShell-based reporting tool for Entra ID (formerly Azure Active Directory). It connects to Microsoft Graph to retrieve detailed information on users, applications, and service principals, then generates comprehensive reports in both CSV and HTML formats. It supports two modes: a detailed "Full" report for all users and a "Summary" report aggregated by domain. The script is designed to be self-sufficient, checking for and installing necessary modules before execution.
 
-.DESCRIPTION
-  ByUser: every single user  
-  ByDomain: aggregates counts from the ByUser data  
+Parameters
+UserServiceAccountNamesLike: An array of strings used to identify service accounts by matching patterns in their User Principal Name (e.g., "svc-", "sa-"). This is optional.
 
-.PARAMETER Mode
-  Full or Summary.
+Mode: Specifies the type of reports to generate. The valid options are "Full" (default) or "Summary".
 
-.PARAMETER DaysInactive
-  Threshold in days to consider a user “inactive” (default 180).
+DaysInactive: An integer representing the number of days of inactivity to check for when identifying inactive users. The default value is 180.
 
-.PARAMETER UserServiceAccountLike
-  Wildcard pattern to identify service‐accounts (default “svc-*”).
+CheckOwnership: A switch parameter. When present, the script performs additional, more time-consuming calls to count the number of applications and service principals owned by each user. This is not used by default.
+
+Example of Usage
+Full Report with Ownership Check
+The following command runs the script in Full mode, checks for users inactive for 180 days, identifies service accounts with names starting with "svc-" or "sa-", and performs the ownership check.
+
+PowerShell
+
+.\EntraID-ReportGenerator.ps1 -Mode Full -DaysInactive 180 -UserServiceAccountNamesLike "svc-", "sa-" -CheckOwnership
+Summary Report
+This command runs the script in Summary mode, which only generates the aggregated domain report.
+
+PowerShell
+
+.\EntraID-ReportGenerator.ps1 -Mode Summary
 #>
 
 param (
@@ -68,7 +78,6 @@ catch {
     Write-Log "Could not log the command line. Error: $_" "WARNING" "Yellow"
 }
 
-
 # === Initialization and Connection ===
 function Initialize-EntraPrerequisites {
     $requiredPSVersion = [Version]"5.1"
@@ -77,6 +86,7 @@ function Initialize-EntraPrerequisites {
         "Microsoft.Graph.Applications",
         "Microsoft.Graph.Identity.DirectoryManagement"
     )
+    Write-Log "Loading required modules..." "INFO" "Cyan"
 
     if ($PSVersionTable.PSVersion -lt $requiredPSVersion) {
         Write-Log "PowerShell $requiredPSVersion or higher is required. Current version: $($PSVersionTable.PSVersion)" "ERROR" "Red"
@@ -92,7 +102,7 @@ function Initialize-EntraPrerequisites {
             if (-not (Get-Module -Name $module)) {
                 Import-Module $module -ErrorAction Stop
             }
-            Write-Log "Successfully loaded module '$module'." "INFO"
+            Write-Log "Successfully loaded module '$module'." "INFO" "Green"
         } catch {
             Write-Log "Failed to load module '$module'. $_" "ERROR" "Red"
             exit 1
@@ -106,13 +116,16 @@ function Initialize-EntraPrerequisites {
     [System.Threading.Thread]::CurrentThread.CurrentCulture = 'en-US'
     [System.Threading.Thread]::CurrentThread.CurrentUICulture = 'en-US'
 
-    Write-Log "Entra ID prerequisites validated. Modules are ready." "INFO" "Green"
+    Write-Log "Successfully validated Entra ID prerequisites. Modules are ready." "INFO" "Green"
 }
 
 function Connect-EntraGraph {
+
+    Write-Log "Connecting to Microsoft Graph" "INFO" "Cyan"
+
     try {
         if (-not (Get-MgContext)) {
-            Write-Log "Connecting to Microsoft Graph..." "INFO" "Green"
+            #Write-Log "Connecting to Microsoft Graph..." "INFO" "Green"
             Connect-MgGraph -Scopes "User.Read.All", "Directory.Read.All", "Application.Read.All", "AuditLog.Read.All"
         }
 
@@ -120,7 +133,7 @@ function Connect-EntraGraph {
             Write-Log "Login cancelled or authentication failed. Graph session not established." "ERROR" "Red"
             exit 1
         }
-        Write-Log "Connected to Microsoft Graph successfully." "INFO" "Green"
+        Write-Log "Successfully connected to Microsoft Graph." "INFO" "Green"
     } catch {
         Write-Log "An error occurred while connecting to Microsoft Graph. $_" "ERROR" "Red"
         exit 1
@@ -139,48 +152,43 @@ function Get-ReportHeaders {
         [Parameter(Mandatory)]
         [ValidateSet('ByUser', 'ByDomain')]
         [string] $Type,
-
         [Parameter()]
         [switch] $CheckOwnership
     )
     
     switch ($Type) {
         'ByUser' {
-            $baseHeaders = [PSCustomObject]@{
-                Directory         = 'Directory'
-                User              = 'User'
-                AccountEnabled    = 'AccountEnabled'
-                ActiveUser        = 'ActiveUser'
-                InactiveUser      = 'InactiveUser'
-                NeverLoggedInUser = 'NeverLoggedInUser'
-                PatternMatchedUser = 'PatternMatchedUser'
-                SyncFromAD        = 'SyncFromAD'
-                ADSourceDomain    = 'ADSourceDomain'
+            $baseHeaders = [ordered]@{
+                Directory               = 'Directory'
+                User                    = 'User'
+                AccountEnabled          = 'Account Enabled'
+                ActiveUser              = 'Active Users'
+                InactiveUser            = 'Inactive Users'
+                NeverLoggedInUser       = 'Never Logged In'
+                PatternMatchedUser      = 'Service Account Pattern'
+                SyncFromAD              = 'Synch from AD'
+                ADSourceDomain          = 'Source AD'
             }
 
             if ($CheckOwnership) {
-                $baseHeaders | Add-Member -MemberType NoteProperty -Name 'OwnedAppsCount' -Value 'AppRegistrationsOwned'
-                $baseHeaders | Add-Member -MemberType NoteProperty -Name 'EnterpriseAppsCount' -Value 'EnterpriseAppsOwned'
-                $baseHeaders | Add-Member -MemberType NoteProperty -Name 'ManagedIdentitiesCount' -Value 'ManagedIdentitiesOwned'
+                $baseHeaders['OwnedAppsCount']          = 'App owned by User'
+                $baseHeaders['EnterpriseAppsCount']     = 'SP owned by User'
+                $baseHeaders['ManagedIdentitiesCount']  = 'Managed Identity'
             }
-            return $baseHeaders
+            return [PSCustomObject]$baseHeaders
         }
         
         'ByDomain' {
             return [PSCustomObject]@{
-                Domain                        = 'Domain'
-                TotalUsers                    = 'TotalUsers'
-                AccountEnabledCount           = 'AccountEnabledCount'
-                ActiveUsers                   = 'ActiveUsers'
-                InactiveUsers                 = 'InactiveUsers'
-                NeverLoggedInUsers            = 'NeverLoggedInUsers'
-                PatternMatchedUsers           = 'PatternMatchedUsers'
-                SyncFromADCount               = 'SyncFromADCount'
-                ADSourceDomainCounts          = 'ADSourceDomainCounts'
-                DomainApplicationsCount       = 'DomainApplicationsCount'
-                DomainServicePrincipalCount   = 'DomainServicePrincipalCount'
-                DomainManagedIdentitiesCount  = 'DomainManagedIdentitiesCount'
-                ValidEnterpriseAppsCount      = 'ValidEnterpriseAppsCount'
+                Domain                        = 'Directory'
+                TotalUsers                    = 'Total Users'
+                ActiveUsers                   = 'Active Users'
+                InactiveUsers                 = 'Inactive Users'
+                NeverLoggedInUsers            = 'Never Logged In Users'
+                PatternMatchedUsers           = 'Service Account Pattern'
+                DomainApplicationsCount       = 'Applications'
+                DomainServicePrincipalCount   = 'Service Principals'
+                DomainManagedIdentitiesCount  = 'Managed Identities'
             }
         }
     }
@@ -205,6 +213,9 @@ function Get-ByUserData {
     begin {
         $cutoff = (Get-Date).AddDays(-$DaysInactive)
         Write-Verbose "Inactivity cutoff date: $cutoff"
+        
+        # Initialize an array to store the output, making it accessible to all blocks
+        $script:output = @()
     }
 
     process {
@@ -236,6 +247,7 @@ function Get-ByUserData {
                 }
                 catch {
                     Write-Verbose "Could not get owners for application $($app.DisplayName). Error: $_"
+                    Write-Log "Could not get owners for application $($app.DisplayName). Error: $_" "ERROR" "RED"
                 }
             }
 
@@ -252,6 +264,7 @@ function Get-ByUserData {
                 }
                 catch {
                     Write-Verbose "Could not get owners for service principal $($sp.DisplayName). Error: $_"
+                    Write-Log "Could not get owners for service principal $($sp.DisplayName). Error: $_" "ERROR" "RED"
                 }
             }
         }
@@ -259,7 +272,7 @@ function Get-ByUserData {
             Write-Verbose "Skipping detailed ownership checks for applications, service principals, and managed identities."
         }
         
-        $output = foreach ($u in $users) {
+        foreach ($u in $users) {
             Write-Verbose "Processing user: $($u.UserPrincipalName)"
 
             $parts     = if ($u.UserPrincipalName) { $u.UserPrincipalName.Split('@') } else { @('','') }
@@ -291,7 +304,7 @@ function Get-ByUserData {
             $enterpriseCount = $spAppOwners[$u.Id]    -or 0
             $miCount         = $spMiOwners[$u.Id]     -or 0
 
-            [PSCustomObject]@{
+            $script:output += [PSCustomObject]@{
                 Directory               = $directory
                 User                    = $user
                 AccountEnabled          = [int]$u.AccountEnabled
@@ -306,10 +319,23 @@ function Get-ByUserData {
                 ManagedIdentitiesCount  = $miCount
             }
         }
-
-        Write-Verbose "Built $($output.Count) user records."
-        return $output
     }
+
+    end {
+        Write-Verbose "Built $($script:output.Count) user records. Calculating totals..."
+        Write-Log "Successfully built $($script:output.Count) user records." "INFO" "Green"
+
+        # Build a grand-total row
+        $totals = [ordered]@{ Directory = "TOTAL"; User = "" }
+        foreach ($col in $script:output | Get-Member -MemberType NoteProperty | Select-Object -Expand Name | Where-Object { $_ -ne 'Directory' -and $_ -ne 'User' -and $_ -ne 'ADSourceDomain' }) {
+            $totals[$col] = ($script:output | Measure-Object -Property $col -Sum).Sum
+        }
+        $totals['ADSourceDomain'] = ''
+        
+        # Add the total row to the end of the data and return it
+        $script:output += [PSCustomObject]$totals
+        return $script:output
+  }
 }
 
 #————————————————————————————————————————
@@ -336,7 +362,6 @@ function Get-ByDomainData {
 
   begin {
     $rows = @()
-    $now  = Get-Date
 
     # Grab your tenant GUID and all verified domains
     $org = Get-MgOrganization -ErrorAction Stop
@@ -363,13 +388,13 @@ function Get-ByDomainData {
 
         $tenantAppsCount = ($ServicePrincipals |
           Where-Object {
-            # Corrected check: ensure AppId exists before lookup
+            # Ensure AppId exists before lookup
             -not [string]::IsNullOrEmpty($_.AppId) -and ($AppDomainMap[$_.AppId] -eq $domain) -and ($_.ServicePrincipalType -eq 'Application')
           }).Count
 
         $tenantMIsCount = ($ManagedIdentities |
           Where-Object {
-            # Corrected check: ensure AppId exists before lookup
+            # Ensure AppId exists before lookup
             -not [string]::IsNullOrEmpty($_.AppId) -and ($AppDomainMap[$_.AppId] -eq $domain)
           }).Count
 
@@ -439,9 +464,11 @@ function Get-ByDomainData {
     }
     # Add a blank value for ADSourceDomainCounts (since it can't be summed)
     $totals['ADSourceDomainCounts'] = ''
-
+    
+    Write-Log "Successfully aggregated $($rows.Count-1) different domain(s)." "INFO" "Green"
     return $rows + [PSCustomObject]$totals
   }
+  
 }
 
 #————————————————————————————————————————
@@ -457,21 +484,37 @@ function Export-CsvReport {
 
         [Parameter(Mandatory)]
         [PSCustomObject] $Columns
+        
     )
-    
+
     # Construct the full path
-    $fullPath = Join-Path -Path $OutputPath -ChildPath $FileName
+    $fullPath = Join-Path -Path $outputPath -ChildPath $FileName
+    
+    # Create a new, empty array for the calculated properties
+    $calculatedProperties = @()
 
-    # Add a check to create the output directory if it doesn't exist
-    if (-not (Test-Path -Path $OutputPath)) {
-        New-Item -Path $OutputPath -ItemType Directory -Force
+    try {
+
+        # Iterate through the columns and build the array of calculated properties
+         foreach ($name in $Columns.PSObject.Properties.Name) {
+        $header = $Columns."$name" # Get the custom header text
+        
+        # Add a new calculated property to the array
+        $calculatedProperties += @{
+            Name       = $header
+            Expression = [scriptblock]::Create("`$_.`"$name`"")
+        }
     }
+    
+        # Select the properties and export to a CSV with custom headers
+        $data | Select-Object -Property $calculatedProperties | Export-Csv -Path $fullPath -NoTypeInformation -Force
+        
+        Write-Log "Successfully exported all objects in CSV file $fullPath" "INFO" "Green"
 
-    # Get the property names (the keys of the PSCustomObject)
-    $propertyNames = $Columns.PSObject.Properties.Name
-
-    # Select the properties and export to a CSV
-    $data | Select-Object -Property $propertyNames | Export-Csv -Path $fullPath -NoTypeInformation -Force
+    }
+    catch {
+        Write-Log "Could not export to CSV file $fullPath. Error: $_" "ERROR" "RED"
+    }
 }
 
 function Export-HtmlReport {
@@ -486,28 +529,97 @@ function Export-HtmlReport {
         [object[]] $Data,
 
         [Parameter(Mandatory)]
-        [PSCustomObject] $Columns
+        [PSCustomObject] $Columns,
+
+        [Parameter()]
+        [string] $SecondReportTitle,
+
+        [Parameter()]
+        [object[]] $SecondReportData,
+
+        [Parameter()]
+        [PSCustomObject] $SecondReportColumns,
+        
+        [Parameter(Mandatory)]
+        [string] $OutputPath
     )
-    
-        # Construct the full path
-    $fullPath = Join-Path -Path $OutputPath -ChildPath $FileName
 
-    # Add a check to create the output directory if it doesn't exist
-    if (-not (Test-Path -Path $OutputPath)) {
-        New-Item -Path $OutputPath -ItemType Directory -Force
+    # Construct the full path
+    $fullPath = Join-Path -Path $outputPath -ChildPath $FileName
+
+    try {
+        # Internal function to build an HTML table from data and columns
+        function New-HtmlTable {
+            param(
+                [Parameter(Mandatory)]
+                [string] $TableTitle,
+
+                [Parameter(Mandatory)]
+                [object[]] $TableData,
+
+                [Parameter(Mandatory)]
+                [PSCustomObject] $TableColumns
+            )
+            
+            $html = "<h2>$TableTitle</h2>"
+            $html += '<table><tr>'
+
+            # Add headers
+            foreach ($header in $TableColumns.PSObject.Properties.Value) {
+                $html += "<th>$header</th>"
+            }
+            $html += '</tr>'
+
+            # Add data rows
+            foreach ($row in $TableData) {
+                $html += '<tr>'
+                foreach ($colName in $TableColumns.PSObject.Properties.Name) {
+                    $value = $row."$colName"
+                    $html += "<td>$value</td>"
+                }
+                $html += '</tr>'
+            }
+
+            $html += '</table>'
+            return $html
+        }
+
+        $htmlBody = @"
+<html>
+<head>
+    <style>
+        body { font-family: sans-serif; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+        th { background-color: #3498db; color: white; }
+        tr:nth-child(even) { background-color: #f2f2f2; }
+    </style>
+</head>
+<body>
+    <h1>ENTRA ID Report</h1>
+    <hr>
+"@
+
+        # Add the first table
+        $htmlBody += New-HtmlTable -TableTitle $Title -TableData $Data -TableColumns $Columns
+
+        # If a second report is provided, add it
+        if ($SecondReportData) {
+            $htmlBody += "<br>"
+            $htmlBody += New-HtmlTable -TableTitle $SecondReportTitle -TableData $SecondReportData -TableColumns $SecondReportColumns
+        }
+        
+        $htmlBody += @"
+</body>
+</html>
+"@
+        
+        $htmlBody | Out-File -FilePath $fullPath -Encoding UTF8
+        Write-Log "Successfully exported HTML report to $fullPath" "INFO" "Green"
     }
-
-    # Get the property names from the PSCustomObject
-    $propertyNames = $Columns.PSObject.Properties.Name
-
-    $html = @()
-    $html += '<html><head><style>body { font-family: sans-serif; }</style></head><body>'
-    $html += "<h1>$Title</h1>"
-    $html += '<hr>'
-    $html += (ConvertTo-Html -Fragment -InputObject $Data -Property $propertyNames)
-    $html += '</body></html>'
-
-    $html | Out-File -FilePath $fullPath -Encoding UTF8 -Force
+    catch {
+        Write-Log "Could not export to HTML file $fullPath. Error: $_" "ERROR" "RED"
+    }
 }
 
 #==================================================================================================
@@ -515,8 +627,8 @@ function Export-HtmlReport {
 #==================================================================================================
 
 #— 1) Récupérations globales Microsoft Graph
-Write-Host "Loading global Graph data…" -ForegroundColor Cyan
 # Get applications and create a lookup table for AppId -> PublisherDomain
+Write-Log "Loading global Graph data - Fetching Applications..." "INFO" "Cyan"
 $applications = Get-MgApplication -All -Property PublisherDomain,AppId,DisplayName
 $appDomainMap = @{}
 foreach ($app in $applications) {
@@ -526,20 +638,26 @@ foreach ($app in $applications) {
 }
 
 # Get service principals with necessary properties
+Write-Log "Loading global Graph data - Fetching Service Principals..." "INFO" "Cyan"
 $servicePrincipals = Get-MgServicePrincipal -All -Property PublisherDomain,ServicePrincipalType,AppId,accountEnabled,passwordCredentials,keyCredentials
+
+Write-Log "Loading global Graph data - Fetching Managed Identities..." "INFO" "Cyan"
 $managedIdentities = $servicePrincipals | Where-Object servicePrincipalType -eq 'ManagedIdentity'
 
 #— 2) Construction du rapport détaillé par utilisateur
-Write-Host "Building per-user dataset…" -ForegroundColor Cyan
+Write-Log "Building per-user dataset..." "INFO" "Cyan"
 $byUser = Get-ByUserData `
     -DaysInactive $DaysInactive `
-    -ServicePattern $UserServiceAccountLike `
+    -ServicePattern $UserServiceAccountNamesLike `
     -CheckOwnership:$CheckOwnership
 
+# Filter out the last row (the 'TOTAL' row) before passing the data to Get-ByDomainData
+$domainDataInput = $byUser | Select-Object -SkipLast 1
+
 #— 3) Agrégation par domaine
-Write-Host "Aggregating by domain…" -ForegroundColor Cyan
+Write-Log "Building aggregated report by Domain..." "INFO" "Cyan"
 $byDomain = Get-ByDomainData `
-  -UserData          $byUser `
+  -UserData          $domainDataInput `
   -Applications      $applications `
   -ServicePrincipals $servicePrincipals `
   -ManagedIdentities $managedIdentities `
@@ -549,23 +667,33 @@ $byDomain = Get-ByDomainData `
 $userCols   = Get-ReportHeaders -Type ByUser -CheckOwnership:$CheckOwnership
 $domainCols = Get-ReportHeaders -Type ByDomain
 
-#— 5) Horodatage pour nommage des fichiers
-$timestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm'
-
 #— 6) Export CSV & HTML en fonction du mode
 if ($Mode -eq 'Full') {
-    Write-Host "Exporting full reports…" -ForegroundColor Green
+    Write-Log "Exporting Full reports in CSV and HTML format..." "INFO" "Cyan"
 
     Export-CsvReport -FileName "Full_ByUser_$timestamp.csv"    -Data  $byUser   -Columns $userCols
     Export-CsvReport -FileName "Full_ByDomain_$timestamp.csv"  -Data  $byDomain -Columns $domainCols
-    Export-HtmlReport -FileName "Full_Report_$timestamp.html"   -Title 'Full EntraID Report' -Data  $byUser   -Columns $userCols
+    #Export-HtmlReport -FileName "Full_Report_$timestamp.html"   -Title 'Full EntraID Report' -Data  $byUser   -Columns $userCols
+    Export-HtmlReport -FileName "Full_Report_$timestamp.html" `
+                   -Title 'User Details' `
+                   -Data  $byUser `
+                   -Columns $userCols `
+                   -SecondReportTitle 'Domain Summary' `
+                   -SecondReportData $byDomain `
+                   -SecondReportColumns $domainCols `
+                   -OutputPath $OutputPath
 }
+
 else {
-    Write-Host "Exporting summary reports…" -ForegroundColor Green
+    Write-Log "Exporting Summary reports in CSV and HTML format..." "INFO" "Cyan"
 
     Export-CsvReport   -FileName "Summary_ByDomain_$timestamp.csv" -Data  $byDomain -Columns $domainCols
     Export-HtmlReport  -FileName "Summary_Report_$timestamp.html"  -Title 'EntraID Summary'    `
-                       -Data  $byDomain -Columns $domainCols
+                       -Data  $byDomain -Columns $domainCols                
 }
 
-Write-Host "All done!" -ForegroundColor Green
+# Reset Culture settings back to original value
+[System.Threading.Thread]::CurrentThread.CurrentCulture = $OriginalCulture
+[System.Threading.Thread]::CurrentThread.CurrentUICulture = $OriginalUICulture
+
+Write-Log "ENTRA ID reports generation completed." "INFO" "Green"
